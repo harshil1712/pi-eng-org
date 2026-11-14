@@ -4,7 +4,7 @@
  */
 {
   "$schema": "node_modules/wrangler/config-schema.json",
-  "name": "pi-on-cf",
+  "name": "pi-eng-org",
   "compatibility_date": "2026-11-04",
   "compatibility_flags": ["nodejs_compat", "experimental"],
   "main": "src/server.ts",
@@ -72,18 +72,19 @@
       "new_sqlite_classes": ["PiRegistry"],
     },
   ],
-  // The app's one R2 bucket. Agent Skills live under `skills/`.
+  // The app's one R2 bucket. Agent Skills live under `skills/`. Local in
+  // local dev, in `.wrangler/`, so skills saved while testing never reach
+  // production sessions.
   "r2_buckets": [
     {
       "binding": "BUCKET",
-      "bucket_name": "pi-on-cf",
-      "remote": true,
+      "bucket_name": "pi-eng-org",
     },
   ],
   "artifacts": [
     {
       "binding": "ARTIFACTS",
-      "namespace": "pi-apps",
+      "namespace": "pi-eng-org",
       "remote": true,
     },
   ],
@@ -134,13 +135,13 @@
     "r2_buckets": [
       {
         "binding": "BUCKET",
-        "bucket_name": "pi-on-cf-preview",
+        "bucket_name": "pi-eng-org-preview",
       },
     ],
     "artifacts": [
       {
         "binding": "ARTIFACTS",
-        "namespace": "pi-apps-preview",
+        "namespace": "pi-eng-org-preview",
       },
     ],
     "worker_loaders": [

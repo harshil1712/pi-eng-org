@@ -1,4 +1,14 @@
-# Pi on Cloudflare
+# Pi Eng Org
+
+An engineering team of Pi agents on Cloudflare: one **engineering manager** session that never writes code, running a ticket board and up to five **builder** sessions, one per ticket and pull request. It is built on [pi-on-cf](https://github.com/harshil1712/pi-on-cf) and modelled on Ryan Carson's talk [How One Founder Manages 20 AI Coding Agents at Once](https://www.youtube.com/watch?v=BTtyguoPvBU). See [the team guide](docs/team.md) for how it works.
+
+Open **Team** in the sidebar, click **Start manager**, and tell the manager what to build. It writes tickets and assigns builders. Each builder gets up to three review rounds from a reviewer agent and a recorded QA run. When a ticket is ready, it appears in your review inbox: watch the recording, click **Ship**, and the merge queue merges the pull request.
+
+To watch QA recordings, set the `CLOUDFLARE_ACCOUNT_ID` var and a `BROWSER_RECORDING_TOKEN` secret (an API token with Browser Rendering read access). Both are optional.
+
+Everything below describes the pi-on-cf base, which still works as a solo agent.
+
+## Pi on Cloudflare
 
 A Worker-native coding agent. Pi runs in Cloudflare Durable Objects with a persistent Cloudflare Computer workspace, remembers its work across evictions, and can clone a GitHub repository, change it on a branch, and open a draft pull request.
 
@@ -39,10 +49,10 @@ npm run dev
 
 Open `http://localhost:3000`.
 
-Local development uses remote AI, R2, Artifacts, and Browser bindings. Create the bucket once:
+Local development uses remote AI, Artifacts, and Browser bindings. The R2 bucket is local, in `.wrangler/`, and starts empty: shared skills you save while testing stay on your machine. Create the production bucket once before deploying:
 
 ```bash
-npx wrangler r2 bucket create pi-on-cf
+npx wrangler r2 bucket create pi-eng-org
 ```
 
 Local Durable Object state lives in `.wrangler/` and can contain transcripts and workspace files. Do not publish it. If the account's `workers.dev` subdomain is behind Cloudflare Access, local development asks you to authenticate; non-interactive environments need `CLOUDFLARE_ACCESS_CLIENT_ID` and `CLOUDFLARE_ACCESS_CLIENT_SECRET`, or a different account.
@@ -113,7 +123,7 @@ Accepted deliveries return `202` and start a queued session. Bodies are limited 
 - **MCP:** add servers in **Settings**. The registry stores credentials and shares enabled tools with every session through one codemode `mcp` tool. Connect only trusted servers: tools use your credentials and results can contain prompt injection.
 - **Skills:** built-ins come from `src/server/bundled-skills`, repository skills from the clone, and shared skills from `skills/` in R2. A repository skill overrides a shared skill with the same name; a built-in overrides both. Shared skills affect every session, so restrict who can write them.
 
-Worker Previews are isolated except for external credentials: previews use separate Durable Objects and the `-preview` R2/Artifacts resources. They do not include a Computer container, and the App webhook continues to target production. Create the preview bucket with `npx wrangler r2 bucket create pi-on-cf-preview`.
+Worker Previews are isolated except for external credentials: previews use separate Durable Objects and the `-preview` R2/Artifacts resources. They do not include a Computer container, and the App webhook continues to target production. Create the preview bucket with `npx wrangler r2 bucket create pi-eng-org-preview`.
 
 ## Deploy and verify
 

@@ -18,6 +18,7 @@ import { PiRegistry as AppPiRegistry } from '~/server/pi-registry'
 import { PiSession as AppPiSession } from '~/server/pi-session'
 import type { TestMcp } from './test-mcp'
 import type { ModelOption, RunStatus, SessionTask } from '~/contract'
+import type { MergeOutcome } from '~/server/github'
 import { bucketSkills, builtInSkills } from '~/server/skills'
 import { webFetchTool, type WebFetchSource } from 'agents/webfetch/pi'
 import { webSearchTool, type WebSearchSource } from 'agents/websearch/pi'
@@ -160,7 +161,8 @@ export class PiSession extends AppPiSession {
   /** Two faux models on one provider, so tests can switch between them. */
   protected override modelSource() {
     const faux = fauxProvider({ tokensPerSecond: 500, models: [{ id: 'faux-a' }, { id: 'faux-b' }] })
-    faux.setResponses(Array.from({ length: 100 }, () => script))
+    // The team tests' manager is one session that answers every test in its file, so it needs many.
+    faux.setResponses(Array.from({ length: 1000 }, () => script))
     const [a, b] = faux.models
 
     return { provider: faux.provider, default: a, choices: [{ model: a, label: 'Faux A' }, { model: b, label: 'Faux B' }] }
@@ -213,6 +215,19 @@ export class PiSession extends AppPiSession {
     return task
   }
 
+  /** Write `files` in the task's repository, and commit them unless `commit` is false. */
+  async changeForTest(files: Record<string, string>, commit = true): Promise<void> {
+    const workspace = await getWorkspace(this)
+    const git = workspace.git as GitClient
+    const dir = this.state.task!.dir
+
+    for (const [path, content] of Object.entries(files)) await workspace.fs.writeFile(`${dir}/${path}`, content)
+
+    if (!commit) return
+    await git.add({ dir, paths: Object.keys(files) })
+    await git.commit({ dir, message: 'change' })
+  }
+
   /** Sync the `mcp` tool with the registry now, as after a prompt; `true` when it changed. */
   async syncMcpToolsForTest(): Promise<boolean> {
     await this.harness.pi()
@@ -257,6 +272,59 @@ export class PiRegistry extends AppPiRegistry {
   @callable()
   override listModels(): ModelOption[] {
     return [{ id: 'faux-a', label: 'Faux A' }, { id: 'faux-b', label: 'Faux B' }]
+  }
+
+  /** Team updates reach the manager at once, so tests need not wait out the batching delay. */
+  protected override notifyDelaySeconds(): number {
+    return 0
+  }
+
+  /** Waiting pull requests are tried again at once, and given up on after three attempts. */
+  protected override mergeRetrySeconds(): number {
+    return 0
+  }
+
+  protected override mergeMaxAttempts(): number {
+    return 3
+  }
+
+  #mergeOutcomes: MergeOutcome[] = []
+  #mergeCalls: string[] = []
+  #closeCalls: string[] = []
+
+  /** What GitHub answers the merge queue, in order; `waiting` once they run out. */
+  protected override mergeOnGitHub(repo: string, number: number): Promise<MergeOutcome> {
+    this.#mergeCalls.push(`${repo}#${number}`)
+
+    return Promise.resolve(this.#mergeOutcomes.shift() ?? { kind: 'waiting', detail: 'No outcome set' })
+  }
+
+  protected override closeOnGitHub(repo: string, number: number, comment: string): Promise<void> {
+    this.#closeCalls.push(`${repo}#${number}: ${comment}`)
+
+    return Promise.resolve()
+  }
+
+  /** The pull requests the registry closed as superseded, as repo#number and the comment. */
+  closeCallsForTest(): string[] {
+    return this.#closeCalls
+  }
+
+  setMergeOutcomesForTest(outcomes: MergeOutcome[]): void {
+    this.#mergeOutcomes = outcomes
+    this.#mergeCalls = []
+  }
+
+  /** The pull requests the merge queue tried to merge, in order, as repo#number. */
+  mergeCallsForTest(): string[] {
+    return this.#mergeCalls
+  }
+
+  /** Empty the board, its messages and queued updates, since tests share the registry. */
+  clearBoardForTest(): void {
+    this.#closeCalls = []
+
+    for (const table of ['team_tickets', 'team_messages', 'team_updates', 'team_reservations']) this.ctx.storage.sql.exec(`DELETE FROM ${table}`)
   }
 
   /** Add the test MCP server over RPC, as `connectMcpServer` adds a URL. */

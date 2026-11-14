@@ -2,6 +2,8 @@
 
 Pi on Cloudflare is a Worker-native cloud coding agent: Pi's durable harness (`@earendil-works/pi-durable`) runs inside Cloudflare Durable Objects, with a Cloudflare Computer workspace per session, Workers AI through the `AI` binding, and a GitHub App for clones, pushes, and pull requests. TanStack Start renders the UI from Kumo components.
 
+This repository, pi-eng-org, adds a manager/builder team on top: read `docs/team.md` before changing `board.ts`, `team.ts`, `team-tools.ts`, or the team RPC in `pi-registry.ts`.
+
 Read `docs/architecture.md` for the full system design before changing anything in `src/server/`, and the README for deployment, the GitHub App, and web tool configuration. This file is the day-to-day guide; those are the source of truth.
 
 ## Commands
@@ -20,7 +22,7 @@ Read `docs/architecture.md` for the full system design before changing anything 
 | `npm run generate-routes` | Regenerate `src/routeTree.gen.ts` after adding routes; never edit that file. |
 | `npm run cf-typegen` | Regenerate `worker-configuration.d.ts` after changing `wrangler.jsonc` bindings. |
 
-`npm run dev` needs Docker, for the Computer container, and a `wrangler login`, because AI, R2, Artifacts, and Browser bindings are remote in local development. Local Durable Object state lands in `.wrangler/` and can hold transcripts and workspace files; do not publish it. Set the GitHub App secrets and `WEBHOOK_SECRET` locally in `.dev.vars` or `.env`, and keep account-specific configuration in an ignored `wrangler.local.jsonc` (`CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH=wrangler.local.jsonc` for Vite, `--config` for Wrangler). Press `t + Enter` in `npm run dev` for a Quick Tunnel when testing the GitHub webhook locally.
+`npm run dev` needs Docker, for the Computer container, and a `wrangler login`, because AI, Artifacts, and Browser bindings are remote in local development; the R2 bucket is local, in `.wrangler/`. Local Durable Object state lands in `.wrangler/` and can hold transcripts and workspace files; do not publish it. Set the GitHub App secrets and `WEBHOOK_SECRET` locally in `.dev.vars` or `.env`, and keep account-specific configuration in an ignored `wrangler.local.jsonc` (`CLOUDFLARE_VITE_WRANGLER_CONFIG_PATH=wrangler.local.jsonc` for Vite, `--config` for Wrangler). Press `t + Enter` in `npm run dev` for a Quick Tunnel when testing the GitHub webhook locally.
 
 ## Layout
 
@@ -33,7 +35,8 @@ src/
 ├── hooks/, lib/         session/registry connections; transcript projection, theme, mentions
 └── server/              Worker only
     ├── pi-session.ts    one Durable Object per session: PiHarness, tools, task, web
-    ├── pi-registry.ts   singleton catalog Durable Object, the only route to a session
+    ├── pi-registry.ts   singleton catalog Durable Object, the only route to a session; also the team's board, updates and patrol
+    ├── board.ts, team.ts, team-tools.ts   the ticket board, team messages, and manager/builder tools
     ├── agent-routes.ts  routing; refuses direct /api/agents/pi-session/* requests
     ├── skills.ts        skill sources and publishing; repo-skills.ts the clone's own skills
     ├── github-webhook.ts, generic-webhook.ts   /webhooks/github and /webhooks/generic

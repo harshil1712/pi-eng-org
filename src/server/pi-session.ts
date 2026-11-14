@@ -9,14 +9,14 @@ import type { ArtifactClient } from '@cloudflare/computer/artifacts'
 import { ContainerBackend, withWorkspaceContainer } from '@cloudflare/computer/backends/container'
 import { CodemodeBackend } from '@cloudflare/computer/backends/codemode'
 import { WorkerShellBackend } from '@cloudflare/computer/backends/worker-shell'
-import { createGitClient } from '@cloudflare/computer/git'
+import { createGitClient, type GitClient } from '@cloudflare/computer/git'
 import { createArtifactsModule } from '@cloudflare/computer/modules/artifacts'
 import { createGitModule } from '@cloudflare/computer/modules/git'
 import jqCommands from '@cloudflare/computer/shell/jq'
 import { createCloudflareObserver } from '@cloudflare/computer/observe/cloudflare'
 import { BACKGROUND_CONTEXT } from '@earendil-works/chord/context'
 import type { Provider } from '@earendil-works/pi-ai'
-import type { ToolRegistration } from '@earendil-works/pi-durable'
+import type { Extension, ToolRegistration } from '@earendil-works/pi-durable'
 import { createModels } from '@earendil-works/pi-ai/models'
 import { type ConversationView, ConversationTranscript, type ConversationWatch, createRegistry, Harness, type TranscriptView } from '@earendil-works/pi-durable'
 import { Agent, type AgentStaticOptions, callable, type Connection, getAgentByName } from 'agents'
@@ -32,6 +32,7 @@ import {
   type PiSessionState,
   type SessionTask,
   type TaskChange,
+  type TeamRole,
   type WorkspaceFile,
   type WorkspaceFileContent,
 } from '~/contract'
@@ -45,6 +46,8 @@ import { repoSkills } from './repo-skills'
 import { createSkillTools } from './skill-tools'
 import { bucketSkills, builtInSkills, SkillCatalog } from './skills'
 import { cloneTask, createTaskTools, listChanges, readChange, taskSection } from './task'
+import { builderSection, createBuilderTools, createManagerTools, createQaTools, createReviewerTools, managerSection, qaSection, reviewerSection, TEAM_PROMPT_LIMIT, type TeamApi } from './team-tools'
+import { MAX_BUILDERS } from './team'
 import { createWebTools, webToolGuidance } from './web-tools'
 import { createWorkspaceTools } from './workspace-tools'
 import { WORKSPACE_ROOT, workspacePath } from './workspace-root'
@@ -102,6 +105,24 @@ const THREAD_KEY = 'pi-on-cf:github-thread'
 
 /** Storage key of the run status last reported to the registry. */
 const RUN_STATUS_KEY = 'pi-on-cf:run-status'
+
+/** The longest prompt a person can send. */
+const PROMPT_LIMIT = 20_000
+
+/** Storage key of the session's team role, set by the registry. */
+const ROLE_KEY = 'pi-eng-org:role'
+
+/** The solo agent's extension: workspace, repository, skill and web tools. Managers do without it. */
+const BASE_EXTENSION = 'pi-on-cf'
+
+/** The team role's extension: its prompt and its team tools. */
+const TEAM_EXTENSION = 'pi-eng-org:team'
+
+/** Characters of a session's last answer that `latestReport` returns. */
+const REPORT_LIMIT = 4000
+
+/** A session's part in the team, and a builder's ticket. */
+export type SessionRole = { role: TeamRole; ticket?: string }
 
 /**
  * The container half of the session. The backend lives on this base class
@@ -197,6 +218,9 @@ export class PiSession extends withWorkspace(PiSessionHost, PiSessionHost.worksp
   readonly browser = this.env.BROWSER
     ? new Browser({
       provider: browserRun(this.env.BROWSER, {
+        // Recorded, so a QA run can show the person who ships what it did;
+        // the recording is finalized when the browser closes.
+        recording: true,
         internalHosts: {
           router: this.ctx.exports.InternalHostRouter,
           hosts: { [PREVIEW_HOST]: previewHost(() => this.ctx.container) },
@@ -208,8 +232,10 @@ export class PiSession extends withWorkspace(PiSessionHost, PiSessionHost.worksp
     harness: async ({ storage, context, onWake }) => {
       const workspace = await this.workspace
       const web = this.webTools()
-      this.registry.install({
-        name: 'pi-on-cf',
+      const role = await this.ctx.storage.get<SessionRole>(ROLE_KEY)
+      this.#role = role
+      this.#base = {
+        name: BASE_EXTENSION,
         sections: [
           { key: 'preamble', render: () => preamble(webToolGuidance(web)), tag: false },
           taskSection(() => this.state.task, () => this.workspace),
@@ -238,7 +264,8 @@ export class PiSession extends withWorkspace(PiSessionHost, PiSessionHost.worksp
           workspace,
           onChange: async () => { await this.skills.reload(this.registry) },
         }), ...web],
-      })
+      }
+      this.#installRole()
       // Skills are optional: an unreachable bucket must not stop pi opening.
       await this.skills.sync(this.registry).catch((cause: unknown) => {
         console.error('Could not load skills', cause)
@@ -266,6 +293,10 @@ export class PiSession extends withWorkspace(PiSessionHost, PiSessionHost.worksp
     defaults: { model: this.model.default, thinkingLevel: 'high' },
   })
 
+  /** The solo extension, built when pi opens; see `#installRole`. */
+  #base: Extension | undefined
+  /** The role pi opened with, or that the registry set since. */
+  #role: SessionRole | undefined
   readonly #watches = new Map<string, ConversationWatch>()
   /** The session's own watch, for its run status; see `onStart`. */
   #statusWatch: ConversationWatch | undefined
@@ -367,7 +398,20 @@ export class PiSession extends withWorkspace(PiSessionHost, PiSessionHost.worksp
 
   @callable()
   async submit(prompt: string) {
-    prompt = validPrompt(prompt)
+    return this.#submit(validPrompt(prompt, PROMPT_LIMIT))
+  }
+
+  /**
+   * A prompt the team writes, not a person: a ticket, a reviewer's diff, the
+   * manager's updates and patrols. These carry repository text, so they get
+   * a higher limit than the composer's. Not callable: only the registry
+   * reaches it, over Durable Object RPC.
+   */
+  async submitFromTeam(prompt: string) {
+    return this.#submit(validPrompt(prompt, TEAM_PROMPT_LIMIT))
+  }
+
+  async #submit(prompt: string) {
     const receipt = await this.harness.submit(prompt)
     // Awaited, so a caller that reads the catalog next sees the title a
     // first prompt gives the session. It never throws.
@@ -379,7 +423,7 @@ export class PiSession extends withWorkspace(PiSessionHost, PiSessionHost.worksp
 
   @callable()
   async steer(prompt: string) {
-    const receipt = await this.harness.session().steer(validPrompt(prompt))
+    const receipt = await this.harness.session().steer(validPrompt(prompt, PROMPT_LIMIT))
     this.ctx.waitUntil(this.#syncCatalogs())
 
     return { operationId: receipt.operationId, accepted: receipt.accepted }
@@ -483,6 +527,126 @@ export class PiSession extends withWorkspace(PiSessionHost, PiSessionHost.worksp
    */
   async joinCatalog(entryId: string): Promise<void> {
     await this.ctx.storage.put(CATALOG_ENTRY_KEY, entryId)
+  }
+
+  /**
+   * Called by the registry, at creation and before the first prompt, to make
+   * this session the team's manager or a builder. Pi may already be open,
+   * because a session's first RPC wakes it, so the role's extensions are
+   * installed now as well as whenever pi opens.
+   */
+  async setRole(role: SessionRole): Promise<void> {
+    await this.ctx.storage.put(ROLE_KEY, role)
+    this.#role = role
+    this.#installRole()
+  }
+
+  /** The session's last answer, for the manager and the patrol. */
+  async latestReport(): Promise<string | undefined> {
+    const entries = await this.harness.messages()
+
+    for (const entry of entries.toReversed()) {
+      const message = entry.model?.[0]
+
+      if (message?.role !== 'assistant') continue
+      const text = message.content.flatMap((part) => (part.type === 'text' ? [part.text] : [])).join('').trim()
+
+      if (text) return text.length > REPORT_LIMIT ? `${text.slice(0, REPORT_LIMIT)}…` : text
+    }
+
+    return undefined
+  }
+
+  /**
+   * Install the extensions for the session's role: a manager gets its own
+   * prompt and the board tools in place of the workspace; a builder keeps
+   * the solo extension and adds its team prompt and `ask_manager`. Does
+   * nothing until pi has opened, which calls it again.
+   */
+  #installRole(): void {
+    const base = this.#base
+
+    if (!base) return
+    const role = this.#role?.role
+    const options = { team: () => this.#team(), caller: () => this.#catalogEntry() }
+
+    // The manager and reviewers read and write no code, so they get no workspace.
+    if (role === 'manager' || role === 'reviewer') {
+      this.registry.uninstall(base)
+
+      const extension = role === 'manager'
+        ? { sections: [managerSection(MAX_BUILDERS)], tools: [...createManagerTools(options), ...this.webTools()] }
+        : { sections: [reviewerSection()], tools: createReviewerTools(options) }
+
+      this.registry.install({ name: TEAM_EXTENSION, ...extension })
+
+      return
+    }
+
+    this.registry.install(base)
+
+    if (role === 'builder') {
+      this.registry.install({
+        name: TEAM_EXTENSION,
+        sections: [builderSection(() => this.#role?.ticket)],
+        tools: createBuilderTools({ ...options, changes: () => this.#committedChanges() }),
+      })
+    } else if (role === 'qa') {
+      this.registry.install({ name: TEAM_EXTENSION, sections: [qaSection()], tools: createQaTools({ ...options, finishRecording: () => this.#finishRecording() }) })
+    }
+  }
+
+  /** The task's diff against its base, for review; only committed work, since that is what gets pushed. */
+  async #committedChanges(): Promise<string> {
+    const { task } = this.state
+
+    if (!task) throw new Error('Clone the repository and make your change first.')
+    const workspace = await this.workspace
+    // SAFETY: Computer declares `WorkspaceClient.git` as `any`; at runtime it is the GitClient.
+    const git = workspace.git as GitClient
+    const dirty = await git.status({ dir: task.dir })
+
+    if (dirty.length) throw new Error(`Commit or discard these changes first:\n${dirty.slice(0, 20).map((entry) => entry.path).join('\n')}`)
+    const diff = await git.diff({ dir: task.dir, ref: task.baseCommit })
+
+    if (!diff.trim()) throw new Error('There are no changes to review yet.')
+
+    return diff
+  }
+
+  /**
+   * End the browser session a QA run used, so Browser Run finalizes its
+   * recording, and return its session ID; undefined when the run never
+   * opened the browser. Never throws: a QA result counts without a recording.
+   */
+  async #finishRecording(): Promise<string | undefined> {
+    try {
+      const view = await this.browser?.liveView()
+
+      if (!view) return undefined
+      await this.browser?.close()
+
+      return view.sessionId
+    } catch (error) {
+      console.warn('Could not finish the QA recording', error)
+
+      return undefined
+    }
+  }
+
+  /** The registry, as the team tools call it. */
+  async #team(): Promise<TeamApi> {
+    // SAFETY: PiRegistry declares every TeamApi method with its signature; the stub's mapping of Ticket is too deep for tsc to check.
+    // oxlint-disable-next-line anti-slop/no-chained-type-assertions
+    return getAgentByName(this.env.PiRegistry, PI_REGISTRY_INSTANCE) as unknown as Promise<TeamApi>
+  }
+
+  async #catalogEntry(): Promise<string> {
+    const entryId = await this.ctx.storage.get<string>(CATALOG_ENTRY_KEY)
+
+    if (!entryId) throw new Error('This session is not in the catalog.')
+
+    return entryId
   }
 
   /** Called by the registry when a mention on a GitHub issue starts this session, so Pi can answer there. */
@@ -701,12 +865,12 @@ function send(connection: Connection, message: PiViewMessage): void {
   }
 }
 
-function validPrompt(prompt: string): string {
+function validPrompt(prompt: string, limit: number): string {
   prompt = prompt.trim()
 
   if (!prompt) throw new Error('A prompt is required.')
 
-  if (prompt.length > 20_000) throw new Error('Prompt exceeds 20,000 characters.')
+  if (prompt.length > limit) throw new Error(`Prompt exceeds ${limit.toLocaleString('en-US')} characters.`)
 
   return prompt
 }

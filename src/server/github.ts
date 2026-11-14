@@ -156,6 +156,15 @@ export async function commentOnIssue(token: string, repo: RepoRef, number: numbe
   return (await github<Schema['issue-comment']>(token, `/repos/${repoSlug(repo)}/issues/${number}/comments`, { method: 'POST', body: { body } })).html_url
 }
 
+/** Close a pull request with a comment saying why. Closing one that is already closed or merged changes nothing. */
+export async function closePullRequest(token: string, repo: RepoRef, number: number, comment: string): Promise<void> {
+  const pull = await github<Schema['pull-request']>(token, `/repos/${repoSlug(repo)}/pulls/${number}`)
+
+  if (pull.state !== 'open') return
+  await commentOnIssue(token, repo, number, comment)
+  await github<Schema['pull-request']>(token, `/repos/${repoSlug(repo)}/pulls/${number}`, { method: 'PATCH', body: { state: 'closed' } })
+}
+
 /** React to an issue comment, or to a review comment on a pull request's diff. */
 export async function reactToComment(token: string, repo: RepoRef, comment: { id: number; review?: object }, content: 'eyes' | 'confused'): Promise<void> {
   const path = comment.review ? 'pulls/comments' : 'issues/comments'
@@ -237,5 +246,79 @@ export async function readIssue(token: string, repo: RepoRef, number: number): P
     labels: issue.labels.map((label) => (isString(label) ? label : label.name ?? '')).filter(Boolean),
     body: issue.body ?? '',
     comments: comments.map((comment) => ({ author: comment.user?.login ?? 'ghost', createdAt: comment.created_at, body: comment.body ?? '' })),
+  }
+}
+
+/**
+ * What one merge-queue attempt on a pull request came to:
+ * - `merged`: merged now, or already.
+ * - `updated`: it was behind its base, and GitHub merged the base into it;
+ *   its checks run again before the next attempt.
+ * - `waiting`: not mergeable yet, such as while checks run or GitHub
+ *   computes mergeability; try again later.
+ * - `conflict`: it conflicts with its base; its branch must be redone.
+ * - `failed`: it cannot be merged, such as when it was closed.
+ */
+export type MergeOutcome =
+  | { kind: 'merged'; sha?: string }
+  | { kind: 'updated' }
+  | { kind: 'waiting'; detail: string }
+  | { kind: 'conflict' }
+  | { kind: 'failed'; detail: string }
+
+/**
+ * One step towards merging a pull request, squashed. A draft is marked
+ * ready first, since GitHub merges no drafts. Branch protection still
+ * applies: a pull request its required checks or reviews block waits.
+ */
+export async function mergePullRequest(token: string, repo: RepoRef, number: number): Promise<MergeOutcome> {
+  const path = `/repos/${repoSlug(repo)}/pulls/${number}`
+  const pr = await github<Schema['pull-request']>(token, path)
+
+  if (pr.merged) return { kind: 'merged', ...(pr.merge_commit_sha ? { sha: pr.merge_commit_sha } : {}) }
+
+  if (pr.state === 'closed') return { kind: 'failed', detail: `Pull request #${number} was closed without merging.` }
+
+  if (pr.draft) await markReadyForReview(token, pr.node_id)
+
+  if (pr.mergeable === null) return { kind: 'waiting', detail: 'GitHub is still checking whether it can be merged.' }
+
+  if (pr.mergeable_state === 'dirty') return { kind: 'conflict' }
+
+  if (pr.mergeable_state === 'behind') {
+    await github(token, `${path}/update-branch`, { method: 'PUT', body: { expected_head_sha: pr.head.sha } })
+
+    return { kind: 'updated' }
+  }
+
+  if (pr.mergeable_state === 'blocked') return { kind: 'waiting', detail: 'Branch protection blocks it: required checks or reviews have not passed yet.' }
+
+  try {
+    const merged = await github<Schema['pull-request-merge-result']>(token, `${path}/merge`, { method: 'PUT', body: { merge_method: 'squash', sha: pr.head.sha } })
+
+    return { kind: 'merged', sha: merged.sha }
+  } catch (error) {
+    // 405: not mergeable now; 409: the head moved since it was read.
+    if (error instanceof GitHubError && (error.status === 405 || error.status === 409)) return { kind: 'waiting', detail: error.message }
+    throw error
+  }
+}
+
+/** GitHub's REST API cannot take a pull request out of draft; its GraphQL API can. */
+async function markReadyForReview(token: string, nodeId: string): Promise<void> {
+  const response = await fetch(`${API}/graphql`, {
+    method: 'POST',
+    headers: { Authorization: `Bearer ${token}`, 'Content-Type': 'application/json', 'User-Agent': 'pi-eng-org' },
+    body: JSON.stringify({
+      query: 'mutation($id: ID!) { markPullRequestReadyForReview(input: { pullRequestId: $id }) { pullRequest { isDraft } } }',
+      variables: { id: nodeId },
+    }),
+  })
+
+  // SAFETY: GitHub's GraphQL responses carry `errors` when the mutation failed; a non-JSON body is null.
+  const body = await response.json().catch(() => null) as { errors?: { message: string }[] } | null
+
+  if (!response.ok || body?.errors?.length) {
+    throw new GitHubError(`GitHub could not mark the pull request ready: ${body?.errors?.map((item) => item.message).join('; ') ?? response.statusText}`, response.status)
   }
 }

@@ -4,6 +4,7 @@ import { routeAgentRequest } from 'agents'
 import { AGENT_ROUTES } from './server/agent-routes'
 import { GITHUB_WEBHOOK_PATH, handleGitHubWebhook } from './server/github-webhook'
 import { GENERIC_WEBHOOK_PATH, handleGenericWebhook } from './server/generic-webhook'
+import { handleRecording, RECORDINGS_PATH } from './server/recordings'
 
 export { PiSession } from './server/pi-session'
 
@@ -27,6 +28,9 @@ export default createServerEntry({
     if (pathname === GITHUB_WEBHOOK_PATH) return handleGitHubWebhook(request, env)
 
     if (pathname === GENERIC_WEBHOOK_PATH) return handleGenericWebhook(request, env)
+    const recording = RECORDINGS_PATH.exec(pathname)
+
+    if (recording) return handleRecording(request, env, recording[1]!)
     const agentResponse = await routeAgentRequest(request, env, AGENT_ROUTES)
 
     return agentResponse ?? handler.fetch(request)

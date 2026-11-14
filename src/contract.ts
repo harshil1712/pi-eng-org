@@ -92,9 +92,19 @@ export type TaskChange = {
   deletions: number
 }
 
+/**
+ * A session's part in the team: the engineering manager, which never writes
+ * code and runs the board, or a builder working one ticket. Solo sessions
+ * have no role.
+ */
+export type TeamRole = 'manager' | 'builder' | 'reviewer' | 'qa'
+
 export type SessionSummary = {
   id: string
   name?: string
+  role?: TeamRole
+  /** The ticket a builder works on. */
+  ticket?: string
   /** From the session's first prompt. */
   title?: string
   repo?: string
@@ -175,6 +185,121 @@ export type PiRegistryState = {
 /** A new session: its name, the first prompt, and the model pi answers with. Each is optional. */
 export type CreateSessionInput = { name?: string; prompt?: string; model?: string }
 
+/**
+ * Where a ticket stands. `todo` until the manager assigns it, `in_progress`
+ * while its builder works, `in_review` once the builder opened a pull
+ * request, `blocked` when it needs a decision, and `done` or `cancelled`.
+ */
+export type TicketStatus = 'todo' | 'in_progress' | 'in_review' | 'blocked' | 'done' | 'cancelled'
+
+export const TICKET_STATUSES: readonly TicketStatus[] = ['todo', 'in_progress', 'in_review', 'blocked', 'done', 'cancelled']
+
+/** Statuses that hold one of the `MAX_BUILDERS` builder slots. */
+export const ACTIVE_STATUSES: readonly TicketStatus[] = ['in_progress', 'in_review', 'blocked']
+
+/** One unit of work on the board: one ticket, one builder, one pull request. */
+export type Ticket = {
+  /** `T-<n>`, in creation order. */
+  id: string
+  title: string
+  /** What to build and how to know it is done, in Markdown. */
+  spec: string
+  /** `owner/name` */
+  repo: string
+  baseBranch?: string
+  /** Tickets that must be `done` before this one can be assigned. */
+  dependsOn: string[]
+  status: TicketStatus
+  /** The builder session's catalog ID, once assigned. */
+  builder?: string
+  pullRequest?: PullRequest
+  /** The last word on the ticket's state, from the manager or a person. */
+  note?: string
+  createdAt: string
+  updatedAt: string
+} & TicketProcess
+
+/** A reviewer's verdict on one round of a builder's changes. */
+export type TicketReview = {
+  verdict: 'approved' | 'changes_requested'
+  /** Which round, from 1 to `MAX_REVIEW_ROUNDS`. */
+  round: number
+  comments: string
+  at: string
+}
+
+/** A QA agent's result for the ticket's pull request. */
+export type TicketQa = {
+  result: 'pass' | 'fail'
+  summary: string
+  /** The Browser Run session whose recording shows the QA run, when it used the browser. */
+  recording?: string
+  at: string
+}
+
+/** The manager's request that a person review and ship the ticket. */
+export type HumanReviewRequest = { summary: string; requestedAt: string }
+
+/**
+ * Where a shipped ticket stands in the merge queue. `queued` waits its
+ * turn, `waiting` waits on GitHub (checks, mergeability, or a branch update),
+ * then `merged`, or `conflict` or `failed`, which need the team.
+ */
+export type MergeState = 'queued' | 'waiting' | 'merged' | 'conflict' | 'failed'
+
+export type TicketMerge = {
+  state: MergeState
+  queuedAt: string
+  /** Attempts made while waiting on GitHub. */
+  attempts: number
+  detail?: string
+  /** When a waiting ticket is tried again, in milliseconds since the epoch. */
+  retryAt?: number
+  sha?: string
+}
+
+/** How far a ticket has come through review, QA, the person and the merge queue. */
+export type TicketProcess = {
+  /** Review rounds used, at most `MAX_REVIEW_ROUNDS`. */
+  reviewRounds: number
+  /** The reviewer session's catalog ID. */
+  reviewer?: string
+  review?: TicketReview
+  /** The QA session's catalog ID. */
+  qaSession?: string
+  qa?: TicketQa
+  humanReview?: HumanReviewRequest
+  merge?: TicketMerge
+}
+
+/** Review rounds a builder may ask for before the ticket goes to its manager. */
+export const MAX_REVIEW_ROUNDS = 3
+
+export type CreateTicketInput = { title: string; spec: string; repo: string; baseBranch?: string; dependsOn?: string[] }
+
+export type UpdateTicketInput = { status?: TicketStatus; note?: string }
+
+/** One message between team members, as the team page shows it. */
+export type TeamMessage = {
+  id: number
+  /** `human`, `manager`, `patrol`, or a builder's ticket ID. */
+  from: string
+  to: string
+  body: string
+  at: string
+}
+
+/** The team at a glance: its manager, board and recent messages. */
+export type TeamView = {
+  manager?: SessionSummary
+  tickets: Ticket[]
+  messages: TeamMessage[]
+  /** How many builders may work at once. */
+  maxBuilders: number
+  /** Seconds between the manager's patrols of its builders. */
+  patrolSeconds: number
+}
+
 export interface PiRegistryContract {
   readonly state: PiRegistryState
   createSession(input?: CreateSessionInput): Promise<SessionSummary>
@@ -189,4 +314,18 @@ export interface PiRegistryContract {
   reconnectMcpServer(id: string): Promise<ConnectMcpServerResult>
   setMcpServerEnabled(id: string, enabled: boolean): Promise<McpServerSummary>
   deleteMcpServer(id: string): Promise<void>
+  /** Start the team's engineering manager, or return the one already running. */
+  startManager(input?: { model?: string }): Promise<SessionSummary>
+  getTeam(): Promise<TeamView>
+  createTicket(input: CreateTicketInput): Promise<Ticket>
+  updateTicket(id: string, input: UpdateTicketInput): Promise<Ticket>
+  /** A person approves a ticket in review; it joins the merge queue. */
+  shipTicket(id: string): Promise<Ticket>
+  /** A person sends a ticket in review back to its builder, saying why. */
+  sendBackTicket(id: string, note: string): Promise<Ticket>
+}
+
+/** Where the team page loads a QA recording from: rrweb events, by tab. */
+export function recordingPath(ticketId: string): string {
+  return `/team/recordings/${encodeURIComponent(ticketId)}`
 }
