@@ -3,7 +3,7 @@ import { act, render } from '@testing-library/react'
 import type { JSXElementConstructor, ReactElement, ReactNode } from 'react'
 
 /** The app's paths. Each renders the page under test, so it can read params and navigate. */
-const PATHS = ['/', '/settings', '/sessions/$sessionId']
+const PATHS = ['/', '/settings', '/team', '/sessions/$sessionId']
 
 /**
  * Render `page` under a real, in-memory router at `path`, inside `wrapper`'s

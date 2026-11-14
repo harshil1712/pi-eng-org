@@ -4,7 +4,8 @@ import { Banner } from '@cloudflare/kumo/components/banner'
 import { Button, buttonVariants } from '@cloudflare/kumo/components/button'
 import { Tabs } from '@cloudflare/kumo/components/tabs'
 import { cn } from '@cloudflare/kumo/utils'
-import { GitBranchIcon, GitPullRequestIcon, GlobeIcon, PencilSimpleIcon, SidebarSimpleIcon } from '@phosphor-icons/react'
+import { GitBranchIcon, GitPullRequestIcon, GlobeIcon, PencilSimpleIcon, SidebarSimpleIcon, UsersThreeIcon } from '@phosphor-icons/react'
+import type { TeamRole } from '~/contract'
 import { BrowserViewPanel } from './browser-view'
 import { RenameSessionDialog } from './session-dialogs'
 import { TopBar } from './top-bar'
@@ -15,6 +16,8 @@ import { WorkspaceBrowser } from './workspace-browser'
 import { useBrowserView } from '~/hooks/use-browser-view'
 import { usePiSession } from '~/hooks/use-pi-session'
 import { isOneOf } from '~/lib/one-of'
+
+const ROLE_LABELS: Record<TeamRole, string> = { manager: 'Manager', builder: 'Builder', reviewer: 'Reviewer', qa: 'QA' }
 
 export function SessionPage({ sessionId }: { sessionId: string }) {
   return <SessionView key={sessionId} sessionId={sessionId} />
@@ -55,6 +58,10 @@ function SessionView({ sessionId }: { sessionId: string }) {
   const status = STATUS[!session.isReady ? 'connecting' : session.isRunning ? 'running' : 'ready']
   const chatView = session.mobileView === 'chat'
   const changeCount = task ? session.changes.changes.length : 0
+  // The team's manager and reviewers read and write no code: they have no workspace to show.
+  const role = session.summary?.role
+  const hasWorkspace = role !== 'manager' && role !== 'reviewer'
+  const teamLabel = role === 'manager' ? 'Manager' : role && session.summary?.ticket ? `${ROLE_LABELS[role]} · ${session.summary.ticket}` : undefined
 
   return (
     // Chat and Workspace sit side by side only when the page itself is wide enough, not the window:
@@ -62,7 +69,12 @@ function SessionView({ sessionId }: { sessionId: string }) {
     <main className="@container flex min-h-0 flex-1 flex-col overflow-hidden">
       <TopBar
         actions={<>
-          {browser.available && (
+          {teamLabel && (
+            <a href="/team" className={buttonVariants({ variant: 'ghost', size: 'sm' })} title="Open the team board">
+              <UsersThreeIcon size={14} />{teamLabel}
+            </a>
+          )}
+          {hasWorkspace && browser.available && (
             <Button variant="ghost" size="sm" shape="square" className="size-8.5 @4xl:size-6.5" icon={<GlobeIcon />} onClick={openBrowser} aria-pressed={view === 'browser' && filesOpen} aria-label="Pi's browser" title="Pi's browser" />
           )}
           {task?.pullRequest && (
@@ -70,7 +82,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
               <GitPullRequestIcon size={14} />#{task.pullRequest.number}
             </a>
           )}
-          <Button
+          {hasWorkspace && <Button
             className="hidden @4xl:flex"
             variant={filesOpen ? 'secondary' : 'ghost'}
             size="sm"
@@ -79,7 +91,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
             icon={<SidebarSimpleIcon mirrored />}
           >
             Workspace<ChangesDot count={changeCount} />
-          </Button>
+          </Button>}
         </>}
       >
         <div className="flex min-w-0 flex-1 items-center gap-2.5">
@@ -112,7 +124,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
 
       {/* Narrow: Chat and Workspace are tabs; wide: they sit side by side. */}
       <section className="flex min-h-0 flex-1 flex-col @4xl:flex-row">
-        <nav className="shrink-0 border-b border-kumo-hairline bg-kumo-base px-3 py-1.5 @4xl:hidden" aria-label="Session view">
+        <nav className={cn('shrink-0 border-b border-kumo-hairline bg-kumo-base px-3 py-1.5 @4xl:hidden', !hasWorkspace && 'hidden')} aria-label="Session view">
           <Tabs
             tabs={[
               { value: 'chat', label: 'Chat', render: <button id="chat-tab" aria-label="Chat" aria-controls="chat-panel" /> },
@@ -128,8 +140,8 @@ function SessionView({ sessionId }: { sessionId: string }) {
             activateOnFocus
           />
         </nav>
-        <div id="chat-panel" className={cn('flex min-h-0 min-w-0 flex-1 flex-col', !chatView && 'hidden @4xl:flex')} role="tabpanel" aria-label="Chat" aria-labelledby="chat-tab">
-          <TranscriptView activeTextId={session.activeTextId} entries={session.entries} isRunning={session.isRunning} onScroll={session.handleTranscriptScroll} onTryOperation={() => { session.setInput('Create /workspace/hello.ts with a Worker that returns “Hello from Pi”.'); document.getElementById('prompt')?.focus() }} transcriptRef={session.transcriptRef} />
+        <div id="chat-panel" className={cn('flex min-h-0 min-w-0 flex-1 flex-col', hasWorkspace && !chatView && 'hidden @4xl:flex')} role="tabpanel" aria-label="Chat" aria-labelledby="chat-tab">
+          <TranscriptView team={Boolean(role)} activeTextId={session.activeTextId} entries={session.entries} isRunning={session.isRunning} onScroll={session.handleTranscriptScroll} onTryOperation={() => { session.setInput('Create /workspace/hello.ts with a Worker that returns “Hello from Pi”.'); document.getElementById('prompt')?.focus() }} transcriptRef={session.transcriptRef} />
           <div className="mx-auto w-full max-w-200 shrink-0 px-3 pt-2 pb-[max(0.75rem,env(safe-area-inset-bottom))] @3xl:px-5 @3xl:pb-4">
             {session.error && <Banner className="mb-2" variant="error" role="alert" description={session.error} />}
             <PromptComposer input={session.input} isReady={session.isReady} isRunning={session.isRunning} onAbort={() => void session.abort()} onInputChange={session.setInput} onSubmit={session.submit} repositories={session.listRepositories} models={session.models} model={session.model} onModelChange={(id) => void session.setModel(id)} />
@@ -146,6 +158,7 @@ function SessionView({ sessionId }: { sessionId: string }) {
             chatView && 'hidden @4xl:flex',
             // Last: class merging keeps the last display class, so the toggle must win over `@4xl:flex`.
             !filesOpen && '@4xl:hidden',
+            !hasWorkspace && 'hidden @4xl:hidden',
           )}
         >
           <div className="flex min-h-0 min-w-0 flex-1 flex-col">

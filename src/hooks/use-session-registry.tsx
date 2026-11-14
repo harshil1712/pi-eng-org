@@ -7,6 +7,7 @@ import {
   type PiRegistryContract,
   type PiRegistryState,
   type SessionSummary,
+  type TeamView,
 } from '~/contract'
 import { useAgentConnection } from './use-agent-connection'
 import { useRemote } from './use-remote'
@@ -15,11 +16,16 @@ type SessionRegistry = {
   agent: ReturnType<typeof useAgent<PiRegistryContract, PiRegistryState>>
   error: string
   loading: boolean
+  /** The registry's revision: moves on every catalog or board change, so pages know to reload. */
+  revision: number
   /** Moves whenever an MCP server's connection changes, so Settings knows to reload them. */
   mcpRevision: number
   sessions: SessionSummary[]
   /** When `sessions` was listed, in milliseconds since the epoch. */
   asOf: number
+  /** The team's board and manager, loaded once for the sidebar and the team page. */
+  team: TeamView | undefined
+  teamError: string
 }
 
 const NO_SESSIONS: SessionSummary[] = []
@@ -51,8 +57,15 @@ export function SessionRegistryProvider({ children }: { children: ReactNode }) {
   const { value, error, loading } = list
   const sessions = value?.sessions ?? NO_SESSIONS
   const asOf = value?.asOf ?? 0
+  // The board moves with the same revision as the catalog.
+  const teamView = useRemote(`team:${revision}`, () => agent.stub.getTeam())
+  const team = teamView.value
+  const teamError = teamView.error
 
-  const context = useMemo(() => ({ agent, asOf, error, loading, mcpRevision, sessions }), [agent, asOf, error, loading, mcpRevision, sessions])
+  const context = useMemo(
+    () => ({ agent, asOf, error, loading, mcpRevision, revision, sessions, team, teamError }),
+    [agent, asOf, error, loading, mcpRevision, revision, sessions, team, teamError],
+  )
 
   return <SessionRegistryContext.Provider value={context}>{children}</SessionRegistryContext.Provider>
 }

@@ -240,6 +240,23 @@ describe('SessionPage', () => {
     expect(panel.className.split(' ')).not.toContain('@4xl:hidden')
   })
 
+  it('gives the team manager its chat alone, with a way back to the board', async () => {
+    mocks.registryAgent.stub.listSessions.mockResolvedValue([summary({ role: 'manager', name: 'Engineering manager' })])
+    await renderSession(<SessionPage sessionId="session-12345678" />)
+    await deliver(snapshot([]))
+    expect((await screen.findByRole('link', { name: 'Manager' })).getAttribute('href')).toBe('/team')
+    expect(screen.queryByRole('button', { name: 'Workspace' })).toBeNull()
+    expect(document.getElementById('workspace-panel')!.className.split(' ')).toContain('hidden')
+  })
+
+  it('names a builder\'s ticket', async () => {
+    mocks.registryAgent.stub.listSessions.mockResolvedValue([summary({ role: 'builder', ticket: 'T-3' })])
+    await renderSession(<SessionPage sessionId="session-12345678" />)
+    await deliver(snapshot([]))
+    expect(await screen.findByRole('link', { name: 'Builder · T-3' })).toBeTruthy()
+    expect(screen.getByRole('button', { name: 'Workspace' })).toBeTruthy()
+  })
+
   it('hides the browser when the deployment has none and says so with a fresh probe', async () => {
     await renderSession(<SessionPage sessionId="session-12345678" />)
     await deliver(snapshot([]))

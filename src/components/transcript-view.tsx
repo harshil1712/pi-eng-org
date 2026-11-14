@@ -9,6 +9,8 @@ import { LINK_SAFETY } from './link-safety'
 import { PiMark } from './pi-mark'
 import type { TranscriptEntry } from '~/lib/transcript'
 import { ActivityCard } from './activity-card'
+import { parseTeamMessage } from '~/lib/team-message'
+import { TeamMessageCard } from './team-message-card'
 
 const HighlightedMarkdown = lazy(() => import('./highlighted-code').then((module) => ({ default: module.HighlightedMarkdown })))
 
@@ -33,10 +35,13 @@ type TranscriptViewProps = {
   onScroll: UIEventHandler<HTMLDivElement>
   onTryOperation: () => void
   transcriptRef: RefObject<HTMLDivElement | null>
+  /** A team session: its first message is the brief the team sent it. */
+  team?: boolean
 }
 
-export function TranscriptView({ activeTextId, entries, isRunning, onScroll, onTryOperation, transcriptRef }: TranscriptViewProps) {
+export function TranscriptView({ activeTextId, entries, isRunning, onScroll, onTryOperation, transcriptRef, team = false }: TranscriptViewProps) {
   const assistantText = latestAssistantText(entries)
+  const briefId = team ? entries.find(isUserMessage)?.id : undefined
 
   return (
     <div className="min-h-0 flex-1 overflow-y-auto px-3.5 pt-4 pb-2 md:px-5 md:pt-6" ref={transcriptRef} onScroll={onScroll} aria-busy={isRunning} role="log" aria-live="off">
@@ -53,7 +58,7 @@ export function TranscriptView({ activeTextId, entries, isRunning, onScroll, onT
         </div>
       ) : (
         <div className="mx-auto w-full max-w-190">
-          {entries.map((entry) => <TranscriptRow active={entry.id === activeTextId} entry={entry} isRunning={isRunning} key={entry.id} />)}
+          {entries.map((entry) => <TranscriptRow active={entry.id === activeTextId} brief={entry.id === briefId} entry={entry} isRunning={isRunning} key={entry.id} />)}
           {isRunning && isUserMessage(entries.at(-1)) && (
             <div className="-mt-2 mb-5 flex animate-enter items-center gap-2 text-sm text-kumo-subtle" aria-hidden="true"><Loader size="sm" /> Working…</div>
           )}
@@ -63,12 +68,18 @@ export function TranscriptView({ activeTextId, entries, isRunning, onScroll, onT
   )
 }
 
-const TranscriptRow = memo(function TranscriptRow({ active, entry, isRunning }: {
+const TranscriptRow = memo(function TranscriptRow({ active, brief, entry, isRunning }: {
   active: boolean
+  /** Whether this is the brief a team session started with. */
+  brief: boolean
   entry: TranscriptEntry
   isRunning: boolean
 }) {
   if (entry.type !== 'message') return <ActivityCard entry={entry} />
+  // Messages the team wrote fold into a card, so the agent's replies stand out.
+  const teamMessage = entry.role === 'user' ? parseTeamMessage(entry.text, brief) : undefined
+
+  if (teamMessage) return <TeamMessageCard message={teamMessage} />
 
   return (
     <article className={cn('mb-5 animate-enter', entry.role === 'user' && 'flex justify-end')}>

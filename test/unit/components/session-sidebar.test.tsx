@@ -3,7 +3,7 @@ import type { ReactNode } from 'react'
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest'
 import { Sidebar } from '@cloudflare/kumo/components/sidebar'
 import { Toasty } from '@cloudflare/kumo/components/toast'
-import type { SessionSummary } from '~/contract'
+import type { SessionSummary, TeamView, Ticket } from '~/contract'
 import { AgentConnectionProvider } from '~/hooks/use-agent-connection'
 import { SessionRegistryProvider } from '~/hooks/use-session-registry'
 import { SessionSidebar } from '~/components/session-sidebar'
@@ -15,6 +15,7 @@ const mocks = {
   registry: {
     stub: {
       deleteSession: vi.fn(),
+      getTeam: vi.fn(),
       listSessions: vi.fn(),
       renameSession: vi.fn(),
     },
@@ -30,6 +31,12 @@ const session = (overrides: Partial<SessionSummary> & { id: string }, ago = 0): 
 
   return { status: 'idle', createdAt: at, updatedAt: at, ...overrides }
 }
+
+const ticket = (id: string, overrides: Partial<Ticket> = {}): Ticket => ({
+  id, title: `Title of ${id}`, spec: '', repo: 'octo/demo', dependsOn: [], status: 'in_progress', reviewRounds: 0, createdAt: '', updatedAt: '', ...overrides,
+})
+
+const team = (tickets: Ticket[] = []): TeamView => ({ tickets, messages: [], maxBuilders: 5, patrolSeconds: 900 })
 
 /** The app's providers, over a fake registry connection. */
 function Providers({ children }: { children: ReactNode }) {
@@ -62,6 +69,7 @@ describe('SessionSidebar', () => {
     })
     mocks.registry.stub.deleteSession.mockResolvedValue(undefined)
     mocks.registry.stub.renameSession.mockResolvedValue(undefined)
+    mocks.registry.stub.getTeam.mockResolvedValue(team())
     mocks.registry.stub.listSessions.mockResolvedValue([
       session({ id: 'named-session', name: 'Edge cache prototype', repo: 'octo/demo', pullRequest: { number: 7, url: 'https://github.com/octo/demo/pull/7' } }),
       session({ id: 'titled-session', title: 'Fix the flaky test' }, hour),
@@ -142,6 +150,45 @@ describe('SessionSidebar', () => {
     const { router } = await renderSidebar('/settings')
     fireEvent.click(screen.getByRole('button', { name: 'New session' }))
     await waitFor(() => expect(router.state.location.pathname).toBe('/'))
+  })
+
+  it('nests the team\'s sessions under their tickets, below the board and the manager', async () => {
+    mocks.registry.stub.listSessions.mockResolvedValue([
+      session({ id: 'mine', name: 'My own session' }),
+      session({ id: 'manager', role: 'manager', name: 'Engineering manager' }),
+      session({ id: 'builder-1', role: 'builder', ticket: 'T-1', name: 'T-1: Users table', status: 'running', pullRequest: { number: 8, url: '' } }),
+      session({ id: 'review-1', role: 'reviewer', ticket: 'T-1' }),
+      session({ id: 'builder-2', role: 'builder', ticket: 'T-2', name: 'T-2: Old work' }),
+    ])
+    mocks.registry.stub.getTeam.mockResolvedValue(team([ticket('T-1', { builder: 'builder-1', humanReview: { summary: 'Ready.', requestedAt: '' } }), ticket('T-2', { status: 'done' })]))
+    await renderSidebar('/sessions/review-1')
+
+    expect((await screen.findByRole('link', { name: /^Board/ })).getAttribute('href')).toBe('/team')
+    expect(await screen.findByLabelText('1 ready for your review')).toBeTruthy()
+    expect(screen.getByRole('link', { name: 'Manager' }).getAttribute('href')).toBe('/sessions/manager')
+
+    // The open session's ticket is unfolded, with its builder and reviewer under it.
+    const active = screen.getByRole('button', { name: 'T-1: Title of T-1' })
+    expect(active.getAttribute('aria-expanded')).toBe('true')
+    expect(screen.getByRole('link', { name: /^Builder/ }).getAttribute('href')).toBe('/sessions/builder-1')
+    expect(screen.getByRole('link', { name: 'Review' }).getAttribute('aria-current')).toBe('page')
+
+    // Finished tickets are folded away; the person's own sessions keep their own list.
+    expect(screen.getByRole('button', { name: /^Finished/ }).getAttribute('aria-expanded')).toBe('false')
+    expect(screen.queryByRole('link', { name: 'My own session' })).toBeTruthy()
+    expect(screen.queryByText('T-2: Old work')).toBeNull()
+  })
+
+  it('links each ticket to its details on the board, and marks the open one', async () => {
+    mocks.registry.stub.listSessions.mockResolvedValue([session({ id: 'builder-2', role: 'builder', ticket: 'T-2' })])
+    mocks.registry.stub.getTeam.mockResolvedValue(team([ticket('T-1'), ticket('T-2', { status: 'done' })]))
+    await renderSidebar('/team?ticket=T-2')
+
+    // A finished ticket unfolds when it is the one open.
+    const details = await screen.findByRole('link', { name: 'Details' })
+    expect(details.getAttribute('href')).toBe('/team?ticket=T-2')
+    expect(details.getAttribute('aria-current')).toBe('page')
+    expect(screen.getByRole('link', { name: /^Board/ }).getAttribute('aria-current')).toBeNull()
   })
 
   it('opens Settings from the footer', async () => {

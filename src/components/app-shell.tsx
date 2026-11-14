@@ -7,10 +7,17 @@ import { SessionRegistryProvider } from '~/hooks/use-session-registry'
 import { useKeyboardAwareHeight } from '~/hooks/use-keyboard-aware-height'
 import { SessionSidebar } from './session-sidebar'
 
-/** Kumo's links, the sidebar's included, navigate through the router. */
-const RouterLink = forwardRef<HTMLAnchorElement, LinkComponentProps>(({ href, ...props }, ref) => (
-  <Link ref={ref} {...props} to={href ?? '/'} />
-))
+/**
+ * Kumo's links, the sidebar's included, navigate through the router. The
+ * router takes a query as `search`, not as part of `to`, so it is split off.
+ * Only an exact match counts as current: otherwise the router marks `/team`
+ * current on `/team?ticket=T-1` too, overriding the sidebar's own marking.
+ */
+const RouterLink = forwardRef<HTMLAnchorElement, LinkComponentProps>(({ href, ...props }, ref) => {
+  const [to = '/', query] = (href ?? '/').split('?', 2)
+
+  return <Link ref={ref} activeOptions={{ exact: true }} {...props} to={to} search={query ? Object.fromEntries(new URLSearchParams(query)) : undefined} />
+})
 
 RouterLink.displayName = 'RouterLink'
 
